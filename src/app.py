@@ -5,14 +5,62 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+import secrets
+from pydantic import BaseModel
+from auth import load_teacher_hashes, verify_password
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
+active_sessions = {}
+
+
+class LoginCredentials(BaseModel):
+    username: str
+    password: str
+
+
+def require_teacher(request: Request):
+    username = get_session_teacher(request)
+    if not username:
+        raise HTTPException(status_code=401, detail="Teacher login required")
+    return username
+
+
+def get_session_teacher(request: Request):
+    scheme, separator, token = request.headers.get("Authorization", "").partition(" ")
+    if separator and scheme.lower() == "bearer":
+        return active_sessions.get(token)
+    return None
+
+
+@app.get("/api/session")
+def get_session(request: Request):
+    username = get_session_teacher(request)
+    return {"authenticated": bool(username), "username": username}
+
+
+@app.post("/api/login")
+def login(credentials: LoginCredentials, request: Request):
+    password_hash = load_teacher_hashes().get(credentials.username)
+    if not password_hash or not verify_password(credentials.password, password_hash):
+        raise HTTPException(status_code=401, detail="Invalid username or password")
+
+    token = secrets.token_urlsafe(32)
+    active_sessions[token] = credentials.username
+    return {"authenticated": True, "username": credentials.username, "token": token}
+
+
+@app.post("/api/logout")
+def logout(request: Request):
+    scheme, separator, token = request.headers.get("Authorization", "").partition(" ")
+    if separator and scheme.lower() == "bearer":
+        active_sessions.pop(token, None)
+    return {"authenticated": False}
 
 # Mount the static files directory
 current_dir = Path(__file__).parent
@@ -89,8 +137,9 @@ def get_activities():
 
 
 @app.post("/activities/{activity_name}/signup")
-def signup_for_activity(activity_name: str, email: str):
+def signup_for_activity(activity_name: str, email: str, request: Request):
     """Sign up a student for an activity"""
+    require_teacher(request)
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
@@ -111,8 +160,9 @@ def signup_for_activity(activity_name: str, email: str):
 
 
 @app.delete("/activities/{activity_name}/unregister")
-def unregister_from_activity(activity_name: str, email: str):
+def unregister_from_activity(activity_name: str, email: str, request: Request):
     """Unregister a student from an activity"""
+    require_teacher(request)
     # Validate activity exists
     if activity_name not in activities:
         raise HTTPException(status_code=404, detail="Activity not found")
